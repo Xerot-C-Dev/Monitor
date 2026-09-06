@@ -37,6 +37,37 @@ STATE_FILE = Path(__file__).parent / "state" / "seen.json"
 # SCRAPE
 # ---------------------------------------------------------------------------
 
+# The "Information For Candidates" box on the homepage only shows a short
+# teaser list. The full notice table (with S.No / Publish Date / Title
+# columns — the one we actually want) is swapped into the page via
+# JavaScript when you click that box's "View All" link, with no URL change.
+# This JS finds that specific "View All" link (not the other 3 boxes'
+# identical-looking links) by walking up from the "Information For
+# Candidates" heading, and tags it with an id we can click via Playwright.
+FIND_VIEW_ALL_JS = """
+() => {
+    const headings = Array.from(document.querySelectorAll('*')).filter(el =>
+        el.children.length === 0 &&
+        el.innerText &&
+        el.innerText.trim() === 'Information For Candidates'
+    );
+    for (const h of headings) {
+        let el = h;
+        while (el && el !== document.body) {
+            const link = Array.from(el.querySelectorAll('a')).find(a =>
+                a.innerText && a.innerText.trim() === 'View All'
+            );
+            if (link) {
+                link.id = 'pgi-target-view-all';
+                return true;
+            }
+            el = el.parentElement;
+        }
+    }
+    return false;
+}
+"""
+
 ROW_EXTRACT_JS = """
 () => {
     const dateRegex = /[A-Za-z]{3}\\/\\d{1,2}\\/\\d{4}|\\d{1,2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{2,4}/;
@@ -56,23 +87,40 @@ ROW_EXTRACT_JS = """
 
 def fetch_notices():
     """
-    Returns a list of notice row strings.
-    The notice board on pgimer.edu.in's homepage is rendered inside an
-    <iframe>, not the top-level document — so this checks the main page
-    AND every frame on it, not just document.querySelectorAll on the top
-    page (which cannot see into iframes even when same-origin).
+    Returns a list of notice row strings from the full "PGIMER Forthcoming
+    Examinations" / "Information For Candidates" table.
+
+    That table isn't on the homepage by default — it's swapped in via JS
+    when the "View All" link under "Information For Candidates" is
+    clicked (no URL change). So this: loads the homepage, clicks that
+    specific link, waits for the swap, then scrapes rows from the main
+    page AND any frames (in case the swapped-in content loads into an
+    iframe rather than replacing the main DOM directly).
     """
     notices = []
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_page()
         page.goto(PGIMER_URL, wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(3000)
 
-        # Give any lazy AJAX widgets (including iframe contents) time to populate
-        page.wait_for_timeout(5000)
+        found_link = page.evaluate(FIND_VIEW_ALL_JS)
+        if found_link:
+            print("Found 'View All' link under Information For Candidates — clicking it.")
+            try:
+                page.click("#pgi-target-view-all", timeout=10000)
+                page.wait_for_timeout(4000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Click failed ({e.__class__.__name__}): {e}. Scraping page as-is instead.")
+        else:
+            print("Could not find the 'View All' link — scraping the homepage as-is (may only see the teaser list).")
 
         frames = page.frames
-        print(f"Page loaded. Found {len(frames)} frame(s) total (including main frame).")
+        print(f"Scraping. Found {len(frames)} frame(s) total (including main frame).")
 
         rows = []
         for frame in frames:
