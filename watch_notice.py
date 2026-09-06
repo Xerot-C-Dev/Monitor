@@ -42,29 +42,58 @@ STATE_FILE = Path(__file__).parent / "state" / "seen.json"
 # columns — the one we actually want) is swapped into the page via
 # JavaScript when you click that box's "View All" link, with no URL change.
 # This JS finds that specific "View All" link (not the other 3 boxes'
-# identical-looking links) by walking up from the "Information For
-# Candidates" heading, and tags it with an id we can click via Playwright.
+# identical-looking links). It normalizes whitespace/nbsp before comparing
+# text (the exact-match version failed in practice), and falls back to
+# matching any ancestor context containing "candidate" if an exact heading
+# match isn't found. It always returns diagnostics so the log tells us
+# what it actually saw, even on failure.
 FIND_VIEW_ALL_JS = """
 () => {
-    const headings = Array.from(document.querySelectorAll('*')).filter(el =>
-        el.children.length === 0 &&
-        el.innerText &&
-        el.innerText.trim() === 'Information For Candidates'
+    const norm = s => (s || '')
+        .replace(/\\u00A0/g, ' ')
+        .replace(/\\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+    const anchors = Array.from(document.querySelectorAll('a')).filter(a =>
+        norm(a.innerText) === 'view all'
     );
-    for (const h of headings) {
-        let el = h;
-        while (el && el !== document.body) {
-            const link = Array.from(el.querySelectorAll('a')).find(a =>
-                a.innerText && a.innerText.trim() === 'View All'
-            );
-            if (link) {
-                link.id = 'pgi-target-view-all';
-                return true;
+
+    const diagnostics = anchors.map(a => {
+        let ctx = '';
+        let el = a.parentElement;
+        for (let i = 0; i < 5 && el; i++) {
+            ctx = norm(el.innerText).slice(0, 150);
+            el = el.parentElement;
+        }
+        return ctx;
+    });
+
+    // Prefer an anchor whose nearby ancestor text is an exact heading match
+    for (let i = 0; i < anchors.length; i++) {
+        let el = anchors[i].parentElement;
+        for (let hop = 0; hop < 5 && el; hop++) {
+            if (norm(el.innerText) === 'information for candidates') {
+                anchors[i].id = 'pgi-target-view-all';
+                return { found: true, method: 'exact-heading', diagnostics };
             }
             el = el.parentElement;
         }
     }
-    return false;
+
+    // Fallback: any anchor whose nearby ancestor text merely contains "candidate"
+    for (let i = 0; i < anchors.length; i++) {
+        let el = anchors[i].parentElement;
+        for (let hop = 0; hop < 5 && el; hop++) {
+            if (norm(el.innerText).includes('candidate')) {
+                anchors[i].id = 'pgi-target-view-all';
+                return { found: true, method: 'contains-candidate', diagnostics };
+            }
+            el = el.parentElement;
+        }
+    }
+
+    return { found: false, method: null, diagnostics };
 }
 """
 
@@ -104,9 +133,13 @@ def fetch_notices():
         page.goto(PGIMER_URL, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(3000)
 
-        found_link = page.evaluate(FIND_VIEW_ALL_JS)
-        if found_link:
-            print("Found 'View All' link under Information For Candidates — clicking it.")
+        result = page.evaluate(FIND_VIEW_ALL_JS)
+        print(f"Found {len(result['diagnostics'])} 'View All' link(s) on the page. Nearby context for each:")
+        for i, ctx in enumerate(result["diagnostics"]):
+            print(f"  [{i}] \"{ctx}\"")
+
+        if result["found"]:
+            print(f"Targeting link via '{result['method']}' match — clicking it.")
             try:
                 page.click("#pgi-target-view-all", timeout=10000)
                 page.wait_for_timeout(4000)
@@ -117,7 +150,7 @@ def fetch_notices():
             except Exception as e:
                 print(f"Click failed ({e.__class__.__name__}): {e}. Scraping page as-is instead.")
         else:
-            print("Could not find the 'View All' link — scraping the homepage as-is (may only see the teaser list).")
+            print("Could not identify the right 'View All' link from context — scraping the homepage as-is.")
 
         frames = page.frames
         print(f"Scraping. Found {len(frames)} frame(s) total (including main frame).")
