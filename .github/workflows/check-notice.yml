@@ -1,0 +1,44 @@
+name: PGIMER Notice Watcher
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub may delay cron runs slightly under load.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}   # lets you trigger it manually from the Actions tab
+
+permissions:
+  contents: write   # needed so the workflow can commit the updated seen.json
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run watcher
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python watch_notice.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "pgi-notice-bot"
+          git config user.email "actions@github.com"
+          git add state/seen.json
+          git diff --staged --quiet || git commit -m "Update seen notices [skip ci]"
+          git push
