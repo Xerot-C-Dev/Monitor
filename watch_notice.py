@@ -37,12 +37,30 @@ STATE_FILE = Path(__file__).parent / "state" / "seen.json"
 # SCRAPE
 # ---------------------------------------------------------------------------
 
+ROW_EXTRACT_JS = """
+() => {
+    const dateRegex = /[A-Za-z]{3}\\/\\d{1,2}\\/\\d{4}|\\d{1,2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{2,4}/;
+    const results = [];
+    const all = document.querySelectorAll('tr, li, div');
+    all.forEach(el => {
+        const text = el.innerText ? el.innerText.trim() : '';
+        if (!text || text.length > 400) return;
+        if (dateRegex.test(text) && text.length > 15) {
+            results.push(text.replace(/\\s+/g, ' '));
+        }
+    });
+    return results;
+}
+"""
+
+
 def fetch_notices():
     """
-    Returns a list of dicts: {"title": str, "date": str}
-    Scrapes ALL visible text blocks on the homepage that look like notice rows,
-    not a single brittle CSS selector — so it keeps working even if the exact
-    table markup shifts slightly.
+    Returns a list of notice row strings.
+    The notice board on pgimer.edu.in's homepage is rendered inside an
+    <iframe>, not the top-level document — so this checks the main page
+    AND every frame on it, not just document.querySelectorAll on the top
+    page (which cannot see into iframes even when same-origin).
     """
     notices = []
     with sync_playwright() as p:
@@ -50,29 +68,24 @@ def fetch_notices():
         page = browser.new_page()
         page.goto(PGIMER_URL, wait_until="networkidle", timeout=60000)
 
-        # Give any lazy AJAX widgets a moment to populate
-        page.wait_for_timeout(4000)
+        # Give any lazy AJAX widgets (including iframe contents) time to populate
+        page.wait_for_timeout(5000)
 
-        # Grab every row-like element that contains a date pattern (dd/mm/yyyy,
-        # "Sep/05/2026" etc.) next to text — this is how the notice board rows
-        # are structured, and it's resilient to exact tag/class names.
-        rows = page.evaluate(
-            """
-            () => {
-                const dateRegex = /[A-Za-z]{3}\\/\\d{1,2}\\/\\d{4}|\\d{1,2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{2,4}/;
-                const results = [];
-                const all = document.querySelectorAll('tr, li, div');
-                all.forEach(el => {
-                    const text = el.innerText ? el.innerText.trim() : '';
-                    if (!text || text.length > 400) return;
-                    if (dateRegex.test(text) && text.length > 15) {
-                        results.push(text.replace(/\\s+/g, ' '));
-                    }
-                });
-                return results;
-            }
-            """
-        )
+        frames = page.frames
+        print(f"Page loaded. Found {len(frames)} frame(s) total (including main frame).")
+
+        rows = []
+        for frame in frames:
+            try:
+                frame_rows = frame.evaluate(ROW_EXTRACT_JS)
+                if frame_rows:
+                    print(f"  Frame '{frame.url}' contributed {len(frame_rows)} row(s).")
+                rows.extend(frame_rows)
+            except Exception as e:
+                # Cross-origin frames (e.g. ad/analytics widgets) can't be
+                # evaluated — that's fine, skip them.
+                print(f"  Skipped frame '{frame.url}' ({e.__class__.__name__}).")
+
         browser.close()
 
     # De-duplicate while preserving order
